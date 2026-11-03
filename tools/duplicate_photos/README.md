@@ -4,7 +4,7 @@
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10 or newer
 - [Pillow](https://pypi.org/project/Pillow/) is only needed for `--mode similar`, or for `--keep largest` (which reads image dimensions):
   ```bash
   pip install -r requirements.txt
@@ -54,3 +54,13 @@ python dedupe_photos.py ~/Pictures /mnt/backup/photos --report dupes.csv --delet
 - One file from every duplicate group is always kept.
 - Symlinks are ignored, and a file passed in twice (for example through overlapping folders) is counted only once.
 - If you're unsure, run with `--move-to` first. Check the moved files, then delete the folder yourself.
+
+## Running the tests
+
+```bash
+cd tools/duplicate_photos
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The tests build their own sample images in temporary folders, so they never touch your real photos. GitHub Actions runs them on every pull request that changes this folder. The workflow tests Python 3.10–3.13 on Linux, plus Python 3.13 on Windows and macOS.
