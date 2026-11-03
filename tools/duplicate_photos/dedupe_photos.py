@@ -14,15 +14,19 @@ Two detection modes:
            --threshold bits. Requires Pillow (pip install Pillow).
 
 Safety:
-  * Nothing is deleted unless you pass --delete. Without it the script only
-    reports what it would do (dry run).
-  * --delete asks for confirmation unless --yes is given.
-  * --move-to DIR moves duplicates into DIR instead of deleting them.
+  * Nothing is changed unless you pass --trash, --delete or --move-to.
+    Without one of them the script only reports what it would do (dry run).
+  * --trash sends duplicates to the Recycle Bin / Trash, so they can be
+    restored. Requires send2trash (pip install send2trash).
+  * --delete removes duplicates permanently.
+  * --move-to DIR moves duplicates into DIR instead.
+  * Every action asks for confirmation unless --yes is given.
   * One file in every group is always kept (see --keep).
 
 Examples:
   python dedupe_photos.py ~/Pictures                     # report only
-  python dedupe_photos.py ~/Pictures --delete            # delete exact dupes
+  python dedupe_photos.py ~/Pictures --trash             # exact dupes -> Trash
+  python dedupe_photos.py ~/Pictures --delete            # delete permanently
   python dedupe_photos.py ~/Pictures --mode similar --threshold 5
   python dedupe_photos.py ~/Pictures --move-to ~/dupes --keep newest
   python dedupe_photos.py ~/Pictures --report dupes.csv
@@ -245,12 +249,27 @@ def _unique_destination(dest_dir: Path, name: str) -> Path:
     return target
 
 
-def remove_file(path: Path, move_to: Path | None) -> None:
-    if move_to is None:
+def _load_send2trash():
+    try:
+        from send2trash import send2trash
+    except ImportError:
+        sys.exit("--trash needs send2trash:  pip install send2trash")
+    return send2trash
+
+
+def remove_file(path: Path, method: str, move_to: Path | None = None) -> None:
+    """Remove one duplicate. method is "trash", "delete" or "move"."""
+    if method == "trash":
+        _load_send2trash()(str(path))
+    elif method == "delete":
         path.unlink()
-    else:
+    elif method == "move":
+        if move_to is None:
+            raise ValueError("method 'move' needs move_to")
         move_to.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), _unique_destination(move_to, path.name))
+    else:
+        raise ValueError(f"unknown method: {method}")
 
 
 def human_size(n: float) -> str:
@@ -269,7 +288,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Find duplicate photos and optionally delete them.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Without --delete or --move-to the script only reports (dry run).",
+        epilog="Without --trash, --delete or --move-to the script only "
+               "reports (dry run).",
     )
     p.add_argument("paths", nargs="+", type=Path, help="folders or files to scan")
     p.add_argument("--mode", choices=("exact", "similar"), default="exact",
@@ -284,6 +304,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--extensions", default=None,
                    help="comma-separated extensions to include, e.g. jpg,png")
     action = p.add_mutually_exclusive_group()
+    action.add_argument("--trash", action="store_true",
+                        help="send duplicates to the Recycle Bin / Trash "
+                             "(needs send2trash)")
     action.add_argument("--delete", action="store_true",
                         help="permanently delete duplicates")
     action.add_argument("--move-to", type=Path, metavar="DIR",
@@ -303,6 +326,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.trash:
+        _load_send2trash()  # fail before scanning if it isn't installed
 
     extensions = IMAGE_EXTENSIONS
     if args.extensions:
@@ -350,13 +375,23 @@ def main(argv: list[str] | None = None) -> int:
                     writer.writerow([n, "remove", d, d.stat().st_size])
         print(f"Report written to {args.report}")
 
-    if not (args.delete or move_to):
-        print("\nDry run: nothing was changed. "
-              "Use --delete or --move-to DIR to act on these files.")
+    if args.trash:
+        method = "trash"
+        verb = f"send {total_dupes} file(s) to the Trash"
+        done_word = "Sent to Trash:"
+    elif args.delete:
+        method = "delete"
+        verb = f"PERMANENTLY DELETE {total_dupes} file(s)"
+        done_word = "Deleted"
+    elif move_to:
+        method = "move"
+        verb = f"move {total_dupes} file(s) to {move_to}"
+        done_word = "Moved"
+    else:
+        print("\nDry run: nothing was changed. Use --trash, --delete or "
+              "--move-to DIR to act on these files.")
         return 0
 
-    verb = f"move {total_dupes} file(s) to {move_to}" if move_to \
-        else f"PERMANENTLY DELETE {total_dupes} file(s)"
     if not args.yes:
         answer = input(f"\nAbout to {verb}. Continue? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
@@ -367,13 +402,12 @@ def main(argv: list[str] | None = None) -> int:
     for _, dupes in plan:
         for d in dupes:
             try:
-                remove_file(d, move_to)
+                remove_file(d, method, move_to)
                 done += 1
             except OSError as exc:
                 failed += 1
                 print(f"  ! could not remove {d}: {exc}", file=sys.stderr)
-    action_word = "Moved" if move_to else "Deleted"
-    print(f"{action_word} {done} file(s)" + (f", {failed} failed." if failed else "."))
+    print(f"{done_word} {done} file(s)" + (f", {failed} failed." if failed else "."))
     return 0 if failed == 0 else 2
 
 

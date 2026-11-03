@@ -1,14 +1,13 @@
 # Duplicate Photo Finder
 
-`dedupe_photos.py` is a command-line Python tool that finds duplicate photos and deletes them, or moves them to another folder.
+`dedupe_photos.py` is a command-line Python tool that finds duplicate photos and sends them to the Recycle Bin/Trash, deletes them permanently, or moves them to another folder.
 
 ## Requirements
 
 - Python 3.10 or newer
-- [Pillow](https://pypi.org/project/Pillow/) is only needed for `--mode similar`, or for `--keep largest` (which reads image dimensions):
-  ```bash
-  pip install -r requirements.txt
-  ```
+- Optional libraries, installed together with `pip install -r requirements.txt`:
+  - [Pillow](https://pypi.org/project/Pillow/), needed for `--mode similar` and `--keep largest` (which reads image dimensions).
+  - [send2trash](https://pypi.org/project/Send2Trash/), needed for `--trash`.
 - Optional HEIC/HEIF support in similar mode: `pip install pillow-heif`
 
 ## Detection modes
@@ -24,14 +23,17 @@
 # Dry run: list the duplicates without changing anything
 python dedupe_photos.py ~/Pictures
 
-# Delete exact duplicates (asks for confirmation)
+# Send exact duplicates to the Recycle Bin/Trash (asks for confirmation)
+python dedupe_photos.py ~/Pictures --trash
+
+# Delete exact duplicates permanently
 python dedupe_photos.py ~/Pictures --delete
 
 # Find visually similar photos, keep the highest resolution one, move the rest
 python dedupe_photos.py ~/Pictures --mode similar --keep largest --move-to ~/Duplicates
 
 # Scan several folders, write a CSV report, skip the confirmation prompt
-python dedupe_photos.py ~/Pictures /mnt/backup/photos --report dupes.csv --delete -y
+python dedupe_photos.py ~/Pictures /mnt/backup/photos --report dupes.csv --trash -y
 ```
 
 ### Options
@@ -41,6 +43,7 @@ python dedupe_photos.py ~/Pictures /mnt/backup/photos --report dupes.csv --delet
 | `--mode exact\|similar` | Detection mode (default `exact`) |
 | `--threshold N` | Maximum number of differing bits in similar mode, 0–64 (default 5). Lower is stricter. |
 | `--keep oldest\|newest\|shortest-path\|largest` | Which file in each group to keep (default `oldest`, by modification time) |
+| `--trash` | Send duplicates to the Recycle Bin (Windows) or Trash (macOS, Linux), so they can be restored |
 | `--delete` | Permanently delete duplicates |
 | `--move-to DIR` | Move duplicates to `DIR` instead of deleting them. Name clashes get a `_1`, `_2` suffix. |
 | `-y`, `--yes` | Skip the confirmation prompt |
@@ -50,10 +53,12 @@ python dedupe_photos.py ~/Pictures /mnt/backup/photos --report dupes.csv --delet
 
 ## Safety
 
-- Nothing is changed unless you pass `--delete` or `--move-to`.
+- Nothing is changed unless you pass `--trash`, `--delete` or `--move-to`. You can use only one of them at a time.
+- `--trash` is the safest way to remove duplicates. You can restore a photo from the Recycle Bin/Trash, and it goes back to its original folder. On Linux, files go to the standard desktop Trash (`~/.local/share/Trash`).
+- Every action asks for confirmation unless you pass `-y`.
 - One file from every duplicate group is always kept.
 - Symlinks are ignored, and a file passed in twice (for example through overlapping folders) is counted only once.
-- If you're unsure, run with `--move-to` first. Check the moved files, then delete the folder yourself.
+- Files in the Trash still use disk space until you empty it. Use `--delete` when you're sure and need the space straight away.
 
 ## Running the tests
 
@@ -63,4 +68,4 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-The tests build their own sample images in temporary folders, so they never touch your real photos. GitHub Actions runs them on every pull request that changes this folder. The workflow tests Python 3.10–3.13 on Linux, plus Python 3.13 on Windows and macOS.
+The tests build their own sample images in temporary folders, so they never touch your real photos or your real Trash. GitHub Actions runs them on every pull request that changes this folder. The workflow tests Python 3.10–3.13 on Linux, plus Python 3.13 on Windows and macOS.

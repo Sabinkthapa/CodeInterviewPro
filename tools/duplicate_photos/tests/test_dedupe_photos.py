@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -333,7 +334,7 @@ class TestCli:
         assert "No duplicates found" in capsys.readouterr().out
 
     def test_failed_removal_returns_2(self, library, monkeypatch):
-        def boom(path, move_to):
+        def boom(*args, **kwargs):
             raise PermissionError("read-only")
         monkeypatch.setattr(dp, "remove_file", boom)
         assert dp.main([str(library), "--delete", "-y"]) == 2
@@ -343,6 +344,8 @@ class TestCli:
         ["--threshold", "65"],
         ["--threshold", "-1"],
         ["--delete", "--move-to", "x"],
+        ["--trash", "--delete"],
+        ["--trash", "--move-to", "x"],
     ])
     def test_invalid_arguments(self, library, args):
         with pytest.raises(SystemExit) as exc:
@@ -353,3 +356,132 @@ class TestCli:
         with pytest.raises(SystemExit) as exc:
             dp.main([str(tmp_path / "nope")])
         assert exc.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Send to Trash
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def fake_trash(monkeypatch, tmp_path):
+    """Replace the send2trash module with one that records what it trashed."""
+    import types
+
+    bin_dir = tmp_path / "fake-trash-bin"
+    trashed: list[str] = []
+
+    def send2trash(path):
+        trashed.append(os.path.basename(path))
+        bin_dir.mkdir(exist_ok=True)
+        os.replace(path, bin_dir / f"{len(trashed)}_{os.path.basename(path)}")
+
+    module = types.ModuleType("send2trash")
+    module.send2trash = send2trash
+    monkeypatch.setitem(sys.modules, "send2trash", module)
+    return trashed
+
+
+@pytest.fixture
+def no_send2trash(monkeypatch):
+    # A None entry in sys.modules makes `import send2trash` raise ImportError.
+    monkeypatch.setitem(sys.modules, "send2trash", None)
+
+
+class TestRemoveFile:
+    def test_delete(self, tmp_path):
+        f = write_bytes(tmp_path / "a.jpg", b"x")
+        dp.remove_file(f, "delete")
+        assert not f.exists()
+
+    def test_move(self, tmp_path):
+        f = write_bytes(tmp_path / "a.jpg", b"x")
+        dest = tmp_path / "out"
+        dp.remove_file(f, "move", dest)
+        assert not f.exists()
+        assert (dest / "a.jpg").read_bytes() == b"x"
+
+    def test_trash(self, tmp_path, fake_trash):
+        f = write_bytes(tmp_path / "a.jpg", b"x")
+        dp.remove_file(f, "trash")
+        assert not f.exists()
+        assert fake_trash == ["a.jpg"]
+
+    def test_move_without_destination(self, tmp_path):
+        f = write_bytes(tmp_path / "a.jpg", b"x")
+        with pytest.raises(ValueError):
+            dp.remove_file(f, "move")
+        assert f.exists()
+
+    def test_unknown_method(self, tmp_path):
+        f = write_bytes(tmp_path / "a.jpg", b"x")
+        with pytest.raises(ValueError):
+            dp.remove_file(f, "shred")
+        assert f.exists()
+
+
+class TestTrashCli:
+    def test_trash_with_yes(self, library, fake_trash, capsys):
+        assert dp.main([str(library), "--trash", "-y"]) == 0
+        assert remaining(library) == {"a.jpg", "unique.jpg"}
+        assert sorted(fake_trash) == ["b.jpg", "c.jpg"]
+        assert "Sent to Trash: 2 file(s)." in capsys.readouterr().out
+
+    def test_trash_asks_first(self, library, fake_trash, monkeypatch):
+        prompts = []
+        monkeypatch.setattr("builtins.input",
+                            lambda prompt: prompts.append(prompt) or "n")
+        before = remaining(library)
+        assert dp.main([str(library), "--trash"]) == 1
+        assert remaining(library) == before
+        assert fake_trash == []
+        assert "send 2 file(s) to the Trash" in prompts[0]
+
+    def test_dry_run_mentions_trash(self, library, capsys):
+        dp.main([str(library)])
+        assert "--trash" in capsys.readouterr().out
+
+    def test_missing_send2trash_fails_before_changing_anything(
+            self, library, no_send2trash):
+        before = remaining(library)
+        with pytest.raises(SystemExit) as exc:
+            dp.main([str(library), "--trash", "-y"])
+        assert "pip install send2trash" in str(exc.value.code)
+        assert remaining(library) == before
+
+    def test_dry_run_and_delete_work_without_send2trash(
+            self, library, no_send2trash):
+        assert dp.main([str(library)]) == 0
+        assert dp.main([str(library), "--delete", "-y"]) == 0
+        assert remaining(library) == {"a.jpg", "unique.jpg"}
+
+    def test_trash_failure_is_reported(self, library, monkeypatch, capsys):
+        import types
+
+        def refuse(path):
+            raise OSError("trash not available")
+        module = types.ModuleType("send2trash")
+        module.send2trash = refuse
+        monkeypatch.setitem(sys.modules, "send2trash", module)
+        assert dp.main([str(library), "--trash", "-y"]) == 2
+        assert len(remaining(library)) == 4
+        assert "trash not available" in capsys.readouterr().err
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"),
+                        reason="uses the freedesktop.org Trash layout")
+    def test_real_send2trash_on_linux(self, library, tmp_path, monkeypatch):
+        data_home = tmp_path / "xdg-data"
+        monkeypatch.setenv("XDG_DATA_HOME", str(data_home))
+        # send2trash reads XDG_DATA_HOME when it is imported, so drop any copy
+        # already loaded; otherwise files would go to the user's real Trash.
+        for name in [m for m in sys.modules if m.split(".")[0] == "send2trash"]:
+            monkeypatch.delitem(sys.modules, name)
+        pytest.importorskip("send2trash")
+        assert dp.main([str(library), "--trash", "-y"]) == 0
+        assert remaining(library) == {"a.jpg", "unique.jpg"}
+        trash = data_home / "Trash"
+        assert sorted(p.name for p in (trash / "files").iterdir()) \
+            == ["b.jpg", "c.jpg"]
+        # .trashinfo files record where each photo came from, for restoring
+        infos = sorted((trash / "info").iterdir())
+        assert len(infos) == 2
+        assert all("Path=" in i.read_text() for i in infos)
