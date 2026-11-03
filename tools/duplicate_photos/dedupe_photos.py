@@ -37,7 +37,6 @@ import os
 import shutil
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -197,7 +196,7 @@ def find_similar_duplicates(files: list[Path], threshold: int) -> list[list[Path
         for i in range(len(hashed)):
             hi = hashed[i][1]
             for j in range(i + 1, len(hashed)):
-                if (hi ^ hashed[j][1]).bit_count() <= threshold:
+                if bin(hi ^ hashed[j][1]).count("1") <= threshold:
                     uf.union(i, j)
 
     clusters: dict[int, list[Path]] = defaultdict(list)
