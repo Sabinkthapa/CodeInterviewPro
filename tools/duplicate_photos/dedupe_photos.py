@@ -21,12 +21,15 @@ Safety:
   * --delete removes duplicates permanently.
   * --move-to DIR moves duplicates into DIR instead.
   * Every action asks for confirmation unless --yes is given.
+  * --review opens a window showing each group as thumbnails, so you can
+    choose what to keep before the action runs. Needs Tkinter and Pillow.
   * One file in every group is always kept (see --keep).
 
 Examples:
   python dedupe_photos.py ~/Pictures                     # report only
   python dedupe_photos.py ~/Pictures --trash             # exact dupes -> Trash
   python dedupe_photos.py ~/Pictures --delete            # delete permanently
+  python dedupe_photos.py ~/Pictures --mode similar --review --trash
   python dedupe_photos.py ~/Pictures --mode similar --threshold 5
   python dedupe_photos.py ~/Pictures --move-to ~/dupes --keep newest
   python dedupe_photos.py ~/Pictures --report dupes.csv
@@ -311,6 +314,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="permanently delete duplicates")
     action.add_argument("--move-to", type=Path, metavar="DIR",
                         help="move duplicates into DIR instead of deleting")
+    p.add_argument("--review", action="store_true",
+                   help="open a window to choose which photos to keep "
+                        "before the action runs (needs Tkinter and Pillow)")
     p.add_argument("-y", "--yes", action="store_true",
                    help="do not ask for confirmation")
     p.add_argument("--report", type=Path, metavar="CSV",
@@ -318,6 +324,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if not 0 <= args.threshold <= 64:
         p.error("--threshold must be between 0 and 64")
+    if args.review and not (args.trash or args.delete or args.move_to):
+        p.error("--review needs --trash, --delete or --move-to DIR: it runs "
+                "that action on the photos you don't keep")
     for path in args.paths:
         if not path.exists():
             p.error(f"path does not exist: {path}")
@@ -349,17 +358,38 @@ def main(argv: list[str] | None = None) -> int:
         print("No duplicates found.")
         return 0
 
-    plan: list[tuple[Path, list[Path]]] = []
-    reclaim = 0
+    plan: list[tuple[list[Path], list[Path]]] = []  # per group: (keep, remove)
     for group in sorted(groups, key=lambda g: str(min(g))):
         keep, dupes = split_keep(group, args.keep)
-        plan.append((keep, dupes))
-        reclaim += sum(d.stat().st_size for d in dupes)
+        plan.append(([keep], dupes))
+
+    if args.trash:
+        method, verb, done_word = "trash", "Send to Trash", "Sent to Trash:"
+    elif args.delete:
+        method, verb, done_word = "delete", "Delete permanently", "Deleted"
+    elif move_to:
+        method, verb, done_word = "move", f"Move to {move_to}", "Moved"
+    else:
+        method = verb = done_word = None
+
+    if args.review:
+        from review_window import ReviewUnavailable, run_review
+        print(f"Opening the review window for {len(plan)} group(s)...")
+        try:
+            reviewed = run_review(plan, verb, confirm=not args.yes)
+        except ReviewUnavailable as exc:
+            sys.exit(str(exc))
+        if reviewed is None:
+            print("Review cancelled: nothing was changed.")
+            return 1
+        plan = reviewed
 
     total_dupes = sum(len(d) for _, d in plan)
-    for n, (keep, dupes) in enumerate(plan, 1):
+    reclaim = sum(d.stat().st_size for _, dupes in plan for d in dupes)
+    for n, (keeps, dupes) in enumerate(plan, 1):
         print(f"\nGroup {n}:")
-        print(f"  KEEP    {keep}")
+        for k in keeps:
+            print(f"  KEEP    {k}")
         for d in dupes:
             print(f"  REMOVE  {d}")
     print(f"\n{len(plan)} group(s), {total_dupes} duplicate file(s), "
@@ -369,31 +399,24 @@ def main(argv: list[str] | None = None) -> int:
         with args.report.open("w", newline="") as fh:
             writer = csv.writer(fh)
             writer.writerow(["group", "action", "path", "size_bytes"])
-            for n, (keep, dupes) in enumerate(plan, 1):
-                writer.writerow([n, "keep", keep, keep.stat().st_size])
+            for n, (keeps, dupes) in enumerate(plan, 1):
+                for k in keeps:
+                    writer.writerow([n, "keep", k, k.stat().st_size])
                 for d in dupes:
                     writer.writerow([n, "remove", d, d.stat().st_size])
         print(f"Report written to {args.report}")
 
-    if args.trash:
-        method = "trash"
-        verb = f"send {total_dupes} file(s) to the Trash"
-        done_word = "Sent to Trash:"
-    elif args.delete:
-        method = "delete"
-        verb = f"PERMANENTLY DELETE {total_dupes} file(s)"
-        done_word = "Deleted"
-    elif move_to:
-        method = "move"
-        verb = f"move {total_dupes} file(s) to {move_to}"
-        done_word = "Moved"
-    else:
+    if method is None:
         print("\nDry run: nothing was changed. Use --trash, --delete or "
               "--move-to DIR to act on these files.")
         return 0
+    if total_dupes == 0:
+        print("Nothing to remove.")
+        return 0
 
-    if not args.yes:
-        answer = input(f"\nAbout to {verb}. Continue? [y/N] ").strip().lower()
+    if not (args.yes or args.review):  # the review window already asked
+        prompt = f"{verb}: {total_dupes} file(s)"
+        answer = input(f"\nAbout to {prompt}. Continue? [y/N] ").strip().lower()
         if answer not in ("y", "yes"):
             print("Aborted.")
             return 1
