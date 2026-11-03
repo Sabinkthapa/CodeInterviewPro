@@ -434,7 +434,7 @@ class TestTrashCli:
         assert dp.main([str(library), "--trash"]) == 1
         assert remaining(library) == before
         assert fake_trash == []
-        assert "send 2 file(s) to the Trash" in prompts[0]
+        assert "Send to Trash: 2 file(s)" in prompts[0]
 
     def test_dry_run_mentions_trash(self, library, capsys):
         dp.main([str(library)])
